@@ -1,6 +1,7 @@
 #include<iostream>
 #include<vector>
 #include<string>
+#include<cstring>
 #include<sstream>
 #include<sys/wait.h> // wait()
 #include<unistd.h> // fork(), execvp()
@@ -98,7 +99,7 @@ int main(){
             pid_t pid_r = fork();
             if(pid_r==0){
                 if(!outfile.empty()){
-                    int fd = open(outfile.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+                    int fd = open(outfile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
                     dup2(fd, STDOUT_FILENO);
                     close(fd);
                 }
@@ -132,10 +133,10 @@ int main(){
         }
         
         for (char* arg : args) {
-            free(arg);
+            if(arg)free(arg);
         }
         for (char* arg : sec_args){
-            free(arg);
+            if(arg)free(arg);
         }
     }
     return 0;
