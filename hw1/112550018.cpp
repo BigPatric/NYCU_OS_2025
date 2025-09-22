@@ -1,7 +1,6 @@
 #include<iostream>
 #include<vector>
 #include<string>
-#include<cstring>
 #include<sstream>
 #include<sys/wait.h> // wait()
 #include<unistd.h> // fork(), execvp()
