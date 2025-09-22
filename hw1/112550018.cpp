@@ -49,12 +49,12 @@ int main(){
             else args.push_back(strdup(token.c_str()));
         }
         // if then take away &
-        if(!args.empty() && *args[args.size()-1] == '&'){
+        if(!args.empty() && strcmp(args.back(), "&") == 0){
             neglect = true;
             free(args.back());
             args.pop_back();
         }
-        if(!sec_args.empty() && *sec_args[sec_args.size()-1] == '&'){
+        if(!sec_args.empty() && strcmp(sec_args.back(), "&") == 0){
             neglect = true;
             free(sec_args.back());
             sec_args.pop_back();
@@ -64,8 +64,17 @@ int main(){
         if(!sec_args.empty() && sec_args[0] != nullptr && second_cmd){
             sec_args.push_back(nullptr);
             int pi[2];
-            pipe(pi);// pi[0] is read, pi[1] is write
-            
+            //pipe(pi); pi[0] is read, pi[1] is write
+            if(pipe(pi) == -1){
+                perror("pipe error");
+                for(char* arg: args){
+                    if(arg)free(arg);
+                }
+                for(char* arg: sec_args){
+                    if(arg)free(arg);
+                }
+                continue;
+            }
             //child 1
             pid_t pid_1 = fork();
             if(pid_1==0){
