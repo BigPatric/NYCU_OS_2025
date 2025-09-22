@@ -18,6 +18,7 @@ void sigchild_handler(int signal){
 int main(){
 
     string cmd_line;
+    signal (SIGCHLD, sigchild_handler);
 
     while(true){
         cout << ">";
@@ -53,6 +54,11 @@ int main(){
             free(args.back());
             args.pop_back();
         }
+        if(!sec_args.empty() && *sec_args[sec_args.size()-1] == '&'){
+            neglect = true;
+            free(sec_args.back());
+            sec_args.pop_back();
+        }
         args.push_back(nullptr);
 
         if(!sec_args.empty() && sec_args[0] != nullptr && second_cmd){
@@ -85,8 +91,10 @@ int main(){
             //parent
             close(pi[0]);
             close(pi[1]);
-            waitpid(pid_1, NULL, 0);
-            waitpid(pid_2, NULL, 0);
+            if(!neglect){
+                waitpid(pid_1, NULL, 0);
+                waitpid(pid_2, NULL, 0);    
+            }   
         }
         else if(!sec_args.empty() && sec_args[0] != nullptr && redirect){
             sec_args.push_back(nullptr);
@@ -100,11 +108,19 @@ int main(){
             if(pid_r==0){
                 if(!outfile.empty()){
                     int fd = open(outfile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                    if(fd == -1){
+                        perror("opening output file error\n");
+                        exit(1);
+                    }
                     dup2(fd, STDOUT_FILENO);
                     close(fd);
                 }
                 if(!infile.empty()){
                     int fd = open(infile.c_str(), O_RDONLY);
+                    if(fd == -1){
+                        perror("open input file error\n");
+                        exit(1);
+                    }
                     dup2(fd, STDIN_FILENO);
                     close(fd);
                 }
@@ -112,9 +128,13 @@ int main(){
                 perror("redirection failed");
                 exit(1);
             }
+            else if(pid_r > 0){
+                if(!neglect){
+                    waitpid(pid_r, NULL, 0);
+                }
+            }
         }
         else{
-            signal (SIGCHLD, sigchild_handler);
             pid_t pid = fork();
 
             if(pid < 0){ // error
