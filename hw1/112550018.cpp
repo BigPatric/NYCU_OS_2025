@@ -167,6 +167,8 @@ int main(){
         for (char* arg : sec_args){
             if(arg)free(arg);
         }
+        outfile.clear();
+        infile.clear();
     }
     return 0;
 }
