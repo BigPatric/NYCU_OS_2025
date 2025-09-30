@@ -24,18 +24,15 @@ int main(){
 
     // create shared memory
     int shmid_A = shmget(IPC_PRIVATE, sizeof(int)*dimension*dimension, IPC_CREAT | 0666);
-    int shmid_B = shmget(IPC_PRIVATE, sizeof(int)*dimension*dimension, IPC_CREAT | 0666);
     int shmid_C = shmget(IPC_PRIVATE, sizeof(int)*dimension*dimension, IPC_CREAT | 0666);
 
     int *A = (int *)shmat(shmid_A, NULL, 0);
-    int *B = (int *)shmat(shmid_B, NULL, 0);
     int *C = (int *)shmat(shmid_C, NULL, 0);
 
     // fill the matrix
     for(int i = 0; i < dimension; i++){
         for(int j = 0; j < dimension; j++){
             A[i * dimension + j] = i * dimension + j;
-            B[i * dimension + j] = i * dimension + j;
             C[i * dimension + j] = 0;
         }
     }
@@ -72,12 +69,11 @@ int main(){
                     for(int j = 0; j < dimension; j++){
                         C[i * dimension + j] = 0;
                         for(int k = 0; k < dimension; k++){
-                            C[i * dimension + j] += A[i * dimension + k] * B[k * dimension + j];
+                            C[i * dimension + j] += A[i * dimension + k] * A[k * dimension + j];
                         }
                     }
                 }
                 shmdt(A);
-                shmdt(B);
                 shmdt(C);
                 exit(0);
             }
@@ -93,6 +89,7 @@ int main(){
                 checkSum += C[i * dimension + j];
             }
         }
+
         gettimeofday(&end, NULL);
         long elapsed = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec);
         double elapsed_sec = elapsed / 1000000.0;
@@ -101,7 +98,6 @@ int main(){
     }
 
     shmctl(shmid_A, IPC_RMID, NULL);
-    shmctl(shmid_B, IPC_RMID, NULL);
     shmctl(shmid_C, IPC_RMID, NULL);
 
     return 0;
