@@ -93,7 +93,7 @@ int main(){
         gettimeofday(&end, NULL);
         long elapsed = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec);
         double elapsed_sec = elapsed / 1000000.0;
-        cout << "Elapsed time: " << elapsed_sec << " sec";
+        cout << "Elapsed time: " << elapsed_sec << " sec, ";
         cout << "Checksum: " << checkSum << endl;
     }
 
