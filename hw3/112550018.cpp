@@ -1,175 +1,334 @@
-#include<stdio.h>
-#include<iostream>
-#include<vector>
-#include<fstream>
-#include<pthread.h>
-#include<sys/time.h>
-#include<string>
-#include<algorithm>
+#include <stdio.h>
+#include <iostream>
+#include <vector>
+#include <queue>
+#include <fstream>
+#include <pthread.h>
+#include <sys/time.h>
+#include <string>
+#include <unistd.h>
+#include <functional>
+#include <atomic>
+#include <algorithm>
+
 using namespace std;
 
-// merge [L ... M-1] and [M ... R-1]
-void merge_range(vector<int> &a, vector<int> &tmp, size_t L, size_t M, size_t R){
-    size_t i = L, j = M, k = L;
-    while(i < M && j < R){
-        if(a[i] <= a[j]) tmp[k++] = a[i++];
-        else tmp[k++] = a[j++];
+// bbs
+void bubbleSortRange(vector<int>& arr, int left, int right) {
+    int n = right - left;
+    if (n <= 1) return;
+    for (int i = 0; i < n - 1; ++i) {
+        bool swapped = false;
+        for (int j = left; j < right - i - 1; ++j) {
+            if (arr[j] > arr[j + 1]) {
+                swap(arr[j], arr[j + 1]);
+                swapped = true;
+            }
+        }
+        if (!swapped) break;
     }
-    while(i < M) tmp[k++] = a[i++];
-    while(j < R) tmp[k++] = a[j++];
-    for(k = L; k < R; ++k) a[k] = tmp[k];
 }
 
-// ---------- pthread-based parallel merge sort ----------
+struct ThreadPool {
+    pthread_t *threads = nullptr;
+    int thread_count = 0;
 
-struct ThreadArg {
-    vector<int>* a;
-    vector<int>* tmp;
-    size_t L, R;
+    queue<std::function<void()>> tasks;
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+    pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
+    atomic<int> tasks_total{0};
+    atomic<int> tasks_done{0};
+
+    bool stop = false;
+
+    // Worker thread entry function
+    static void* workerEntry(void* arg) {
+        ThreadPool* pool = static_cast<ThreadPool*>(arg);
+        while (true) {
+            std::function<void()> task;
+            pthread_mutex_lock(&pool->mutex);
+            while (pool->tasks.empty() && !pool->stop) {
+                pthread_cond_wait(&pool->cond, &pool->mutex);
+            }
+            if (pool->stop && pool->tasks.empty()) {
+                pthread_mutex_unlock(&pool->mutex);
+                break;
+            }
+            if (!pool->tasks.empty()) {
+                task = std::move(pool->tasks.front());
+                pool->tasks.pop();
+            }
+            pthread_mutex_unlock(&pool->mutex);
+
+            if (task) {
+                try {
+                    task();
+                } catch (...) {
+                }
+                pool->tasks_done.fetch_add(1);
+                pthread_mutex_lock(&pool->mutex);
+                pthread_cond_signal(&pool->done_cond);
+                pthread_mutex_unlock(&pool->mutex);
+            }
+        }
+        return nullptr;
+    }
+
+    // create n threads
+    void start(int n) {
+        thread_count = n > 0 ? n : 1;
+        threads = new pthread_t[thread_count];
+        stop = false;
+        tasks_total = 0;
+        tasks_done = 0;
+        for (int i = 0; i < thread_count; ++i) {
+            pthread_create(&threads[i], nullptr, &ThreadPool::workerEntry, this);
+        }
+    }
+
+    // submit a task
+    void submit(std::function<void()> f) {
+        pthread_mutex_lock(&mutex);
+        tasks.push(std::move(f));
+        tasks_total.fetch_add(1);
+        pthread_cond_signal(&cond);
+        pthread_mutex_unlock(&mutex);
+    }
+
+    // wait all tasks done
+    void wait_all() {
+        pthread_mutex_lock(&mutex);
+        while (tasks_done.load() < tasks_total.load()) {
+            pthread_cond_wait(&done_cond, &mutex);
+        }
+        pthread_mutex_unlock(&mutex);
+    }
+
+    // shutdown the pool
+    void shutdown() {
+        wait_all();
+
+        pthread_mutex_lock(&mutex);
+        stop = true;
+        pthread_cond_broadcast(&cond);
+        pthread_mutex_unlock(&mutex);
+
+        for (int i = 0; i < thread_count; ++i) {
+            pthread_join(threads[i], nullptr);
+        }
+        delete[] threads;
+        threads = nullptr;
+
+        tasks_total = 0;
+        tasks_done = 0;
+    }
 };
 
-static int max_threads = 1;                // set from main (包括 main thread)
-static int cur_threads = 1;                // currently active threads (count main)
-static pthread_mutex_t th_mtx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t th_cv = PTHREAD_COND_INITIALIZER;
-static size_t spawn_threshold = 1024;     // 若區間小於此則不要再 spawn
+struct TaskNode {
+    int left;
+    int mid;
+    int right;
+    atomic<int> deps{0};
+    vector<TaskNode*> parents;
+    function<void()> action;
+};
 
-// forward declaration
-void merge_sort_rec_threaded(vector<int> &a, vector<int> &tmp, size_t L, size_t R);
+struct Waiter {
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+    bool done = false;
+};
 
-void* thread_sort_func(void* arg){
-    ThreadArg* ta = (ThreadArg*)arg;
-    merge_sort_rec_threaded(*ta->a, *ta->tmp, ta->L, ta->R);
-    delete ta;
-    // decrement active thread count and signal waiters
-    pthread_mutex_lock(&th_mtx);
-    cur_threads--;
-    pthread_cond_signal(&th_cv);
-    pthread_mutex_unlock(&th_mtx);
-    return nullptr;
-}
+void schedule_sort_and_merge(vector<int>& arr, vector<pair<int,int>>& ranges, ThreadPool& pool) {
+    vector<TaskNode*> leaves;
+    vector<TaskNode*> all_tasks;
+    Waiter waiter;
 
-// threaded-aware recursive sort (uses mutex/cond to limit concurrent threads)
-void merge_sort_rec_threaded(vector<int> &a, vector<int> &tmp, size_t L, size_t R){
-    if(R - L <= 1) return;
-    size_t M = L + (R - L) / 2;
-
-    bool spawned = false;
-    pthread_t th;
-
-    // decide whether to spawn a new thread for left half
-    if((R - L) > spawn_threshold){
-        pthread_mutex_lock(&th_mtx);
-        if(cur_threads < max_threads){
-            cur_threads++;
-            spawned = true;
-        }
-        pthread_mutex_unlock(&th_mtx);
+    // queue 8 segments sorting tasks
+    for (auto &pr : ranges) {
+        int l = pr.first;
+        int r = pr.second;
+        TaskNode* node = new TaskNode();
+        node->left = l;
+        node->mid = -1;
+        node->right = r;
+        node->deps.store(0);
+        node->action = [node, &arr, &pool]() {
+            bubbleSortRange(arr, node->left, node->right);
+            for (TaskNode* p : node->parents) {
+                int prev = p->deps.fetch_sub(1);
+                if (prev == 1) {
+                    pool.submit(p->action);
+                }
+            }
+        };
+        leaves.push_back(node);
+        all_tasks.push_back(node);
     }
 
-    if(spawned){
-        ThreadArg* ta = new ThreadArg{&a, &tmp, L, M};
-        if(pthread_create(&th, nullptr, thread_sort_func, ta) != 0){
-            // create failed -> rollback
-            delete ta;
-            pthread_mutex_lock(&th_mtx);
-            cur_threads--;
-            pthread_mutex_unlock(&th_mtx);
-            spawned = false;
+    // build merge tree
+    vector<TaskNode*> current = leaves;
+    while (current.size() > 1) {
+        vector<TaskNode*> next;
+        for (size_t i = 0; i + 1 < current.size(); i += 2) {
+            TaskNode* left = current[i];
+            TaskNode* right = current[i+1];
+            TaskNode* parent = new TaskNode();
+            parent->left = left->left;
+            parent->mid = left->right;
+            parent->right = right->right;
+            parent->deps.store(2);
+            parent->action = [parent, left, right, &arr, &pool, &waiter]() {
+                inplace_merge(arr.begin() + parent->left,
+                              arr.begin() + parent->mid,
+                              arr.begin() + parent->right);
+                for (TaskNode* p : parent->parents) {
+                    int prev = p->deps.fetch_sub(1);
+                    if (prev == 1) {
+                        pool.submit(p->action);
+                    }
+                }
+                if (parent->parents.empty()) {
+                    pthread_mutex_lock(&waiter.mutex);
+                    waiter.done = true;
+                    pthread_cond_signal(&waiter.cond);
+                    pthread_mutex_unlock(&waiter.mutex);
+                }
+            };
+            left->parents.push_back(parent);
+            right->parents.push_back(parent);
+
+            next.push_back(parent);
+            all_tasks.push_back(parent);
         }
+        if (current.size() % 2 == 1) {
+            next.push_back(current.back());
+        }
+        current.swap(next);
     }
 
-    if(spawned){
-        // current thread handles right half concurrently
-        merge_sort_rec_threaded(a, tmp, M, R);
-        // wait for left child to finish before merging
-        pthread_join(th, nullptr);
+    TaskNode* root = current.front();
+    if (!root) {
+        return;
+    }
+    if (root->parents.empty() && root->deps.load() == 0 && root->mid == -1) {
+        TaskNode* leaf = root;
+        auto orig = leaf->action;
+        leaf->action = [orig, &waiter]() {
+            orig();
+            pthread_mutex_lock(&waiter.mutex);
+            waiter.done = true;
+            pthread_cond_signal(&waiter.cond);
+            pthread_mutex_unlock(&waiter.mutex);
+        };
     } else {
-        // no thread created -> sequential recursion
-        merge_sort_rec_threaded(a, tmp, L, M);
-        merge_sort_rec_threaded(a, tmp, M, R);
+        if (root->mid == -1) {
+            TaskNode* leaf = root;
+            auto orig = leaf->action;
+            leaf->action = [orig, &waiter]() {
+                orig();
+                pthread_mutex_lock(&waiter.mutex);
+                waiter.done = true;
+                pthread_cond_signal(&waiter.cond);
+                pthread_mutex_unlock(&waiter.mutex);
+            };
+        }
     }
 
-    merge_range(a, tmp, L, M, R);
-}
-
-void merge_sort_with_pthreads(vector<int> &a, int workers){
-    if(a.empty()) return;
-    vector<int> tmp(a.size());
-    // set limits: treat 'workers' as maximum concurrent threads including main
-    if(workers < 1) workers = 1;
-    max_threads = workers;
-    // reset current active thread count to account for main thread
-    pthread_mutex_lock(&th_mtx);
-    cur_threads = 1;
-    pthread_mutex_unlock(&th_mtx);
-
-    merge_sort_rec_threaded(a, tmp, 0, a.size());
-
-    // wait until all spawned threads finished (cur_threads == 1)
-    pthread_mutex_lock(&th_mtx);
-    while(cur_threads > 1){
-        pthread_cond_wait(&th_cv, &th_mtx);
+    for (TaskNode* leaf : leaves) {
+        pool.submit(leaf->action);
     }
-    pthread_mutex_unlock(&th_mtx);
+
+    pthread_mutex_lock(&waiter.mutex);
+    while (!waiter.done) {
+        pthread_cond_wait(&waiter.cond, &waiter.mutex);
+    }
+    pthread_mutex_unlock(&waiter.mutex);
+
+    for (TaskNode* t : all_tasks) {
+        delete t;
+    }
 }
 
-// ---------- end parallel merge sort ----------
-
-int main(){
+int main() {
     struct timeval start, end;
-    vector<int> numbers;
 
     ifstream fin("input.txt");
-    if(!fin){
+    if (!fin) {
         cerr << "cannot open input.txt\n";
         return 1;
     }
-    long long count;
-    fin >> count;
-    if(!fin){
+    long long count_ll;
+    fin >> count_ll;
+    if (!fin) {
         cerr << "failed to read count\n";
         return 1;
     }
-    numbers.reserve((size_t)min<long long>(count, (long long)1000000000));
-    for(long long i = 0; i < count; ++i){
+    if (count_ll < 0) {
+        cerr << "invalid count\n";
+        return 1;
+    }
+    size_t count = static_cast<size_t>(count_ll);
+
+    vector<int> numbers;
+    numbers.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
         int v;
-        if(!(fin >> v)) break;
+        if (!(fin >> v)) break;
         numbers.push_back(v);
     }
     fin.close();
 
-    // adjust spawn_threshold if you want fewer/more spawns
-    spawn_threshold = 1024;
+    if (numbers.size() != count) {
+        cerr << "Warning: read " << numbers.size() << " numbers, expected " << count << "\n";
+        count = numbers.size();
+    }
 
-    for(int n = 1; n <= 8; n++){
-        vector<int> test_nums = numbers;
+    for (int n = 1; n <= 8; ++n) {
+        vector<int> test_arr = numbers;
+
+        // determine 8 segments
+        const int segs = 8;
+        vector<pair<int,int>> ranges;
+        size_t base = (count == 0 ? 0 : count / segs);
+        size_t rem = (count == 0 ? 0 : count % segs);
+        size_t idx = 0;
+        for (int i = 0; i < segs; ++i) {
+            size_t sz = base + (i < (int)rem ? 1 : 0);
+            if (sz > 0) {
+                ranges.push_back({static_cast<int>(idx), static_cast<int>(idx + sz)});
+            }
+            idx += sz;
+        }
+
         gettimeofday(&start, NULL);
 
-        // call pthread-parallel merge sort with 'n' max concurrent threads (including main)
-        merge_sort_with_pthreads(test_nums, n);
+
+        ThreadPool pool;
+        pool.start(n);
+
+        schedule_sort_and_merge(test_arr, ranges, pool);
+
+        pool.shutdown();
 
         gettimeofday(&end, NULL);
         long elapsed = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec);
         double elapsed_ms = elapsed / 1000.0;
-        
-        printf("worker thread #%d:, elapsed %.6f ms\n", n, elapsed_ms);
+        printf("worker thread #%d, elapsed %.6f ms\n", n, elapsed_ms);
 
-        {
-            string filename = "output_" + to_string(n) + ".txt";
-            ofstream fout(filename);
-            if(!fout){
-                cerr << "cannot open " << filename << '\n';
-            } else {
-                for(size_t i = 0; i < test_nums.size(); ++i){
-                    fout << test_nums[i];
-                    if(i + 1 < test_nums.size()) fout << ' ';
-                }
-                fout << '\n';
-                fout.close();
-            }
+        ofstream fout("output_" + to_string(n) + ".txt");
+        if (!fout) {
+            cerr << "cannot open output file for writing\n";
+            continue;
         }
-
+        for (size_t i = 0; i < test_arr.size(); ++i) {
+            fout << test_arr[i];
+            if (i + 1 < test_arr.size()) fout << ' ';
+        }
+        fout << '\n';
+        fout.close();
     }
 
     return 0;
