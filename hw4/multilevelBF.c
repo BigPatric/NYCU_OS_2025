@@ -12,27 +12,26 @@ static size_t level_size[NUM_LEVEL] = {32, 64, 128, 256, 512, 1024, 2048, 4096, 
 static void *pool = NULL;
 static int first_malloc = 0; 
 
-
-
+// the node prev and next is for the free list
 typedef struct Node {
-    int start_addr; // offset from pool, the starter of the header
     size_t size; // include the header size
-    int free;
     struct Node *next;
     struct Node *prev;
-    uint32_t padding; // to make the header size 32 bytes
+    int free;
+    int start_addr; // offset from pool, the starter of the header
 }node;
 static node* free_list[NUM_LEVEL] = {NULL};
 
-static int size_to_level(size_t total){
-    for(int i = 0; i < NUM_LEVEL; ++i){
-        if(total <= level_size[i]) return i;
+int get_level(size_t size) {
+    for (int i = 0; i < NUM_LEVEL; ++i) {
+        if (size <= level_size[i]) {
+            return i;
+        }
     }
     return NUM_LEVEL - 1;
 }
-
 static void init_pool(){
-    pool = mmap(NULL, 20000, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    pool = mmap(NULL, 20000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if(pool == MAP_FAILED){pool = NULL; return;}
     first_malloc = 1;
     node *initial_node = (node *)pool;
@@ -42,13 +41,14 @@ static void init_pool(){
     initial_node->next = NULL;
     initial_node->prev = NULL;
     int level = NUM_LEVEL - 1; // largest level
+
     free_list[level] = initial_node;
+
 }
 
 static void *find_free_block(size_t size){
     node *best_fit = NULL;
-    int start_lvl = size_to_level(size);
-    for(int lvl = start_lvl; lvl < NUM_LEVEL; ++lvl){
+    for(int lvl = 0; lvl < NUM_LEVEL; ++lvl){
         node *cur = free_list[lvl];
         while(cur){
             if(cur->size >= size){
@@ -63,38 +63,21 @@ static void *find_free_block(size_t size){
     return best_fit;
 }
 
-static void update_free_list(){
-    /* clear heads */
-    for(int i = 0; i < NUM_LEVEL; ++i) free_list[i] = NULL;
-
-    if(!pool) return;
-    char *p = (char*)pool;
-    char *end = p + 20000;
-
-    node *cur = (node*)p;
-    while((char*)cur < end){
-        /* defensively check size to avoid infinite loop */
-        if(cur->size == 0 || (char*)cur + cur->size > end){
-            // corrupted size — stop to avoid infinite loop
-            break;
-        }
-
-        /* reset links for safety */
-        cur->next = cur->prev = NULL;
-
-        if(cur->free){
-            int lvl = size_to_level(cur->size);
-            /* insert at head of level list */
-            cur->next = free_list[lvl];
-            if(free_list[lvl]) free_list[lvl]->prev = cur;
-            free_list[lvl] = cur;
-            cur->prev = NULL;
-        }
-        /* move to next chunk by size (size is total chunk size) */
-        cur = (node *)((char*)cur + cur->size);
-    }
-    return;
+void insert_to_free_list(node *block) {
+    int level = get_level(block->size);
+    block->next = free_list[level];
+    if (free_list[level]) free_list[level]->prev = block;
+    block->prev = NULL;
+    free_list[level] = block;
 }
+void remove_from_free_list(node *block) {
+    int level = get_level(block->size);
+    if (block->prev) block->prev->next = block->next;
+    else free_list[level] = block->next;
+    if (block->next) block->next->prev = block->prev;
+    block->next = block->prev = NULL;
+}
+
 
 static void *split_block(node *block, size_t size){
     // the original become new (taken) + old (free)
@@ -152,12 +135,19 @@ void *malloc(size_t size){
     }
     if(!first_malloc) init_pool();
     size = round_up(size);
-    size += sizeof(node); // include the header size
-    // implement best-fit algorithm to find the best chunk
-    node *best_fit = find_free_block(size);
+    size_t total_size = size + sizeof(node); // include the header size
+    node *best_fit = find_free_block(total_size);
     if(best_fit == NULL){ return NULL; }
-    best_fit = split_block(best_fit, size);
-    update_free_list();
+
+    // 如果剛好等於需求（不含 header），直接分配，不分割
+    if (best_fit->size == total_size) {
+        best_fit->free = 0;
+        // 從 free_list 移除
+        remove_from_free_list(best_fit);
+        return (void *)((char *)best_fit + sizeof(node));
+    }
+
+    best_fit = split_block(best_fit, total_size);
     return (void *)((char *)best_fit + sizeof(node));
 
 }
@@ -185,6 +175,5 @@ void free(void *ptr){
             block->next = next_block->next;
         }
     }
-    update_free_list();
 }
 
