@@ -8,7 +8,6 @@
 #define NUM_LEVEL 11
 static size_t level_size[NUM_LEVEL] = {32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768};
 // use mmap(-1) to create my own "heap" then do the bf
-
 static void *pool = NULL;
 static int first_malloc = 0; 
 
@@ -104,7 +103,6 @@ int round_up(size_t size){ // round the requested size to multiple of 32
 }
 
 void *malloc(size_t size){
-    write(STDOUT_FILENO, "malloc called\n", 14);
     if(size == 0){
         // print out the largest free chunk
         // use munmap to release the memory pool
@@ -121,7 +119,7 @@ void *malloc(size_t size){
         }
 
         char buf[128];
-        int n = snprintf((buf), sizeof(buf), "Max Free Chunk Size = %zu", max_free_size);// calculate the size
+        int n = snprintf((buf), sizeof(buf), "Max Free Chunk Size = %zu\n", max_free_size);// calculate the size
         if(n > 0) write(STDOUT_FILENO, buf, (size_t)n);
 
         if(pool){
