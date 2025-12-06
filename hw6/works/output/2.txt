@@ -1,6 +1,6 @@
 tarfs:
 total 0
-drwxr-xr-x 0 root root    0 Nov 29  2019 dir
+drwxr-xr-x 0 root      root         0 Nov 29  2019 dir
 drwxrwxr-x 0 patrickwu patrickwu    0 Nov 29  2019 dir1
 -rw-rw-r-- 0 patrickwu patrickwu  168 Nov 20  2019 hello_world.html
 drwxrwxr-x 0 patrickwu patrickwu    0 Nov 25  2019 largefile
